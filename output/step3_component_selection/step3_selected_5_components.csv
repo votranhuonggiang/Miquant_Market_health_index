@@ -1,0 +1,6 @@
+overall_rank,component,feature,w1_score,w1_normalized
+1,market_cycle_z,market_cycle_z,0.4009852488340182,0.3783666250778466
+2,trading_above_ema_breadth,trading_above_ema_breadth_z,0.3810893884363114,0.33503626212577176
+3,momentum,momentum_z,0.34689234401144053,0.3174523050242973
+4,money_flow,money_flow_z,0.33516521240567515,0.24098535614318026
+5,prop_flow_z,prop_flow_z,0.30223305650613264,0.20428875919930248
