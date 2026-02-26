@@ -1,0 +1,9 @@
+component,w1_score,rank,selected
+prop,1.7769142325164282,1,True
+momentum,0.5706497905400065,2,True
+sentiment,0.3868753910604733,3,True
+cycle,0.3609150860354291,4,True
+foreign,0.1859435793862521,5,True
+money_flow,0.1489573611251897,6,False
+breadth,0.10307267816659471,7,False
+dispersion,0.09928822498134683,8,False

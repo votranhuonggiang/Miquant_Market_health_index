@@ -1,0 +1,8 @@
+pandas>=2.0.0
+numpy>=1.24.0
+requests>=2.28.0
+scikit-learn>=1.2.0
+python-dotenv>=1.0.0
+arch>=6.0.0
+pykalman>=0.9.7
+matplotlib>=3.7.0
