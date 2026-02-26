@@ -45,8 +45,9 @@ pillar_map = {
 # DATA LOADING
 # ============================================================
 
-def query_questdb(sql_query):
-    """Execute SQL query against QuestDB and return DataFrame."""
+# Helper function to execute SQL queries on QuestDB and return data as a pandas DataFrame
+def query_questdb(sql_query, label="Data"):
+    """Execute SQL query against QuestDB and return DataFrame with tracking info."""
     host = os.environ.get("QUEST_DB_URL", "http://localhost:9000")
     auth = (os.getenv("QUESTDB_USERNAME"), os.getenv("QUESTDB_PASSWORD"))
     try:
@@ -54,15 +55,29 @@ def query_questdb(sql_query):
             host + "/exec", params={"query": sql_query}, auth=auth
         ).json()
         if "dataset" not in response or "columns" not in response:
-            print(f"Error or no data: {response}")
+            print(f"  [DB] {label:25} | Error or no data: {response}")
             return pd.DataFrame()
+        
         df = pd.DataFrame(
             response["dataset"],
             columns=pd.DataFrame(response["columns"])["name"].values,
         )
+        
+        if not df.empty:
+            count = len(df)
+            date_info = ""
+            if "timestamp" in df.columns:
+                ts = pd.to_datetime(df["timestamp"])
+                min_ts = ts.min()
+                max_ts = ts.max()
+                date_info = f" | From: {min_ts.date() if not pd.isnull(min_ts) else 'N/A'} To: {max_ts.date() if not pd.isnull(max_ts) else 'N/A'}"
+            print(f"  [DB] {label:25} | Rows: {count:7}{date_info}")
+        else:
+            print(f"  [DB] {label:25} | Rows:       0 (Empty)")
+            
         return df
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"  [DB] {label:25} | Exception: {e}")
         return pd.DataFrame()
 
 def load_vn100_universe():
@@ -70,8 +85,8 @@ def load_vn100_universe():
         SELECT symbol, timestamp
         FROM ai_ranking_universe
         WHERE universe = 'VN100'
-          AND timestamp >= '2018-01-01' AND timestamp <= '2025-12-31'
-    """)
+          AND timestamp >= '2016-01-01' AND timestamp <= '2025-12-31'
+    """, label="VN100 Universe Map")
 
 def load_universe_prices(universe_df, label="VN100"):
     if universe_df.empty:
@@ -84,21 +99,24 @@ def load_universe_prices(universe_df, label="VN100"):
         FROM raw_eod
         WHERE symbol IN {in_clause}
           AND timestamp >= '2016-01-01'
-    """)
+    """, label=f"{label} Prices")
 
 def load_vnindex():
     return query_questdb(
-        "SELECT * FROM raw_eod WHERE symbol = 'VNINDEX' AND timestamp >= '2016-01-01'"
+        "SELECT * FROM raw_eod WHERE symbol = 'VNINDEX' AND timestamp >= '2016-01-01'",
+        label="VNINDEX Close"
     )
 
 def load_govbond():
     return query_questdb(
-        "SELECT * FROM raw_bond_yield WHERE symbol = 'VN10Y' AND timestamp > '2016-01-01'"
+        "SELECT * FROM raw_bond_yield WHERE symbol = 'VN10Y' AND timestamp > '2016-01-01'",
+        label="Gov Bond 10Y"
     )
 
 def load_money_flow():
     return query_questdb(
-        "SELECT symbol, net_money_flow, timestamp FROM raw_money_flow WHERE timestamp > '2016-01-01'"
+        "SELECT symbol, net_money_flow, timestamp FROM raw_money_flow WHERE timestamp > '2016-01-01'",
+        label="Retail Money Flow"
     )
 
 def load_foreign_trading():
@@ -106,41 +124,42 @@ def load_foreign_trading():
         SELECT timestamp, symbol, netvalue 
         FROM raw_foreign_trading_detail
         WHERE timestamp > '2016-01-01'
-    """)
+    """, label="Foreign Net Flow")
 
 def load_proprietary_trading():
     return query_questdb("""
         SELECT timestamp, symbol, netvalue 
         FROM raw_proprietary_trading_detail
         WHERE timestamp > '2016-01-01'
-    """)
+    """, label="Proprietary Net Flow")
 
 def load_vn30_universe():
     return query_questdb("""
         SELECT symbol, timestamp
         FROM ai_ranking_universe
         WHERE universe = 'VN30'
-          AND timestamp >= '2018-01-01' AND timestamp <= '2025-12-31'
-    """)
+          AND timestamp >= '2016-01-01' AND timestamp <= '2025-12-31'
+    """, label="VN30 Universe Map")
 
 def load_mid_universe():
     return query_questdb("""
         SELECT DISTINCT symbol, timestamp 
         FROM raw_historical_list 
         WHERE is_vnmid = 1
-    """)
+    """, label="MID Universe Map")
 
 def load_small_universe():
     return query_questdb("""
         SELECT DISTINCT symbol, timestamp 
         FROM raw_historical_list 
         WHERE is_vnsml = 1
-    """)
+    """, label="SMALL Universe Map")
 
 # ============================================================
 # MEMBERSHIP & INDEX BUILDERS
 # ============================================================
 
+# Map symbols to their monthly inclusion in a specified universe (e.g., VN100 list changes over time)
 def build_membership_map(universe_df, end_date):
     df = universe_df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -150,9 +169,12 @@ def build_membership_map(universe_df, end_date):
         pd.to_datetime(dict(year=df["year"], month=df["month"], day=1)),
         freq="M"
     )
+    # Group symbols by month
     base_map = {p: set(g["symbol"].astype(str)) for p, g in df.groupby("period")}
     if not base_map:
         return {}
+    
+    # Fill gaps in membership map between start and end dates
     periods_sorted = sorted(base_map.keys())
     start_p = periods_sorted[0]
     last_p = periods_sorted[-1]
@@ -171,6 +193,7 @@ def build_membership_map(universe_df, end_date):
             filled[p] = last_set
     return filled
 
+# Calculate the mean of a metric ONLY for stocks currently in the membership list for each month
 def aggregate_by_membership(panel, membership_map):
     if panel.empty or not membership_map:
         return pd.Series(dtype=float)
@@ -179,20 +202,24 @@ def aggregate_by_membership(panel, membership_map):
     panel.sort_index(inplace=True)
     out_parts = []
     months = panel.index.to_period("M")
+    # Iterate through each month and filter symbols based on the membership map
     for month, month_block in panel.groupby(months):
         members = membership_map.get(month, None)
         if not members:
             continue
+        # Only take columns (symbols) that are in the universe for THIS month
         cols = month_block.columns.intersection(pd.Index(sorted(members)))
         if len(cols) == 0:
             continue
         sub = month_block[cols]
+        # Calculate cross-sectional mean across members
         res = sub.mean(axis=1, skipna=True)
         out_parts.append(res)
     if not out_parts:
         return pd.Series(dtype=float)
     return pd.concat(out_parts).sort_index()
 
+# Builds an Equal-Weighted (EW) index level from constituent prices
 def build_ew_index(vn_df, membership_map=None):
     prices = vn_df.pivot(index="timestamp", columns="symbol", values="close").ffill()
     daily_returns = prices.pct_change().dropna(how="all")
@@ -205,11 +232,13 @@ def build_ew_index(vn_df, membership_map=None):
     out.index.name = "timestamp"
     return out.reset_index()
 
+# Builds a Capitalization-Weighted (CW) index level using (Price * Volume) as a rolling weight proxy
 def build_cw_index(vn_df, membership_map=None):
     df = vn_df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     prices = df.pivot(index="timestamp", columns="symbol", values="close").ffill()
     volume = df.pivot(index="timestamp", columns="symbol", values="volume").fillna(0)
+    # Weights are calculated as Price * Volume from the PREVIOUS day to avoid look-ahead bias
     weights = (prices * volume).shift(1)
     returns = prices.pct_change()
     cw_returns = pd.Series(index=returns.index, dtype=float)
@@ -218,6 +247,7 @@ def build_cw_index(vn_df, membership_map=None):
         if w is None or w.sum() == 0: continue
         valid = ~(row.isna() | w.isna())
         if valid.any():
+            # Weighted average return
             cw_returns.loc[date] = np.average(row[valid], weights=w[valid])
     cw_level = (1 + cw_returns.dropna()).cumprod() * 100.0
     out = pd.DataFrame({"close": cw_level}, index=cw_level.index)
@@ -228,6 +258,8 @@ def build_cw_index(vn_df, membership_map=None):
 # SYNTH TREND — BULL LABEL
 # ============================================================
 
+# Detects underlying price trends (regimes) using L1 trend filtering
+# Returns 1 for Bullish (above trend) and 0 for Bearish
 def trend_filtering(data, lambda_value):
     try:
         n = np.size(data)
@@ -286,6 +318,8 @@ def define_bull_base_labels(df_price, lambda_value=DAILY_LAMBDA):
 # COMPONENT MEASUREMENT FUNCTIONS
 # ============================================================
 
+# --- Pillar: Market Breadth ---
+# Measures what percentage of symbols are trading above their Moving Average (EMA 50)
 def measure_market_breadth(vn100_df, membership_map=None, window=50):
     prices = vn100_df.pivot(index="timestamp", columns="symbol", values="close")
     prices.index = pd.to_datetime(prices.index)
@@ -300,6 +334,8 @@ def measure_market_breadth(vn100_df, membership_map=None, window=50):
         breadth = flags.mean(axis=1)
     return pd.DataFrame({"breadth": breadth}, index=breadth.index)
 
+# --- Pillar: Momentum ---
+# Measures trend momentum using MACD Histogram of an Equal-Weighted index
 def measure_momentum(ew_index_df):
     df = ew_index_df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -312,6 +348,8 @@ def measure_momentum(ew_index_df):
     macd_hist = macd_line - signal_line
     return pd.DataFrame({"momentum": macd_hist}, index=price.index)
 
+# --- Pillar: Sentiment ---
+# Combines Bond Yields (Safe Haven vs Stock Returns) and High/Low Strength for sentiment
 def measure_sentiment(vnindex_df, vn100_df, bond_df):
     idx = vnindex_df.copy()
     idx["timestamp"] = pd.to_datetime(idx["timestamp"])
@@ -355,6 +393,8 @@ def measure_sentiment(vnindex_df, vn100_df, bond_df):
     smoothed, _ = kf.smooth(raw_s.values)
     return pd.DataFrame({"sentiment": smoothed.flatten()}, index=raw_s.index)
 
+# --- Pillar: Market Cycle ---
+# Uses the KST (Know Sure Thing) indicator to identify market "seasons" (Bull/Bear/Neutral transitions)
 def measure_market_cycle(vn_df, membership_map=None):
     def _get_kst(close):
         def roc(s, n): return ((s - s.shift(n)) / s.shift(n)) * 100.0
@@ -371,6 +411,8 @@ def measure_market_cycle(vn_df, membership_map=None):
     market_cycle = aggregate_by_membership(seasons, membership_map) if membership_map else seasons.mean(axis=1)
     return pd.DataFrame({"market_cycle": market_cycle}, index=market_cycle.index)
 
+# --- Pillar: Money Flow ---
+# Aggregates raw transactional money flow across the universe
 def measure_money_flow(money_flow_df, membership_map=None, smoothing_window=50):
     df = money_flow_df.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -405,6 +447,8 @@ def measure_institutional_flow(flow_df, membership_map=None, smoothing_window=50
     else: market_flow = flow_smoothed.sum(axis=1)
     return pd.DataFrame({f"{label}_flow": market_flow.dropna()}, index=market_flow.dropna().index)
 
+# --- Pillar: Dispersion ---
+# Measures internal correlation/volatility spread among universe constituents
 def measure_dispersion_index(vn100_df, membership_map=None):
     close = vn100_df.pivot(index="timestamp", columns="symbol", values="close").ffill()
     volume = vn100_df.pivot(index="timestamp", columns="symbol", values="volume").fillna(0)
@@ -439,6 +483,8 @@ def compute_z_score(series, window=LOOKBACK_PERIOD):
     mu, sigma = series.rolling(window=eff_w, min_periods=min_p).mean(), series.rolling(window=eff_w, min_periods=min_p).std()
     return ((series - mu) / sigma).clip(-3, 3)
 
+# Computes weights for the composite index using rolling PCA (Principal Component Analysis)
+# The first principal component (PC1) capturing the maximum shared variance among features is used for weighting
 def compute_pca_weights(df, cols, window=PCA_WINDOW):
     n_rows = len(df)
     eff_w = min(window, max(n_rows // 2, 20))
@@ -451,9 +497,11 @@ def compute_pca_weights(df, cols, window=PCA_WINDOW):
         if len(chunk) < min_c: continue
         scaler = StandardScaler()
         scaled = scaler.fit_transform(chunk)
+        # PCA(1) identifies the single largest 'theme' in the data
         pca = PCA(n_components=1)
         pca.fit(scaled)
         loadings = pca.components_[0]
+        # Ensure weights are positive (loadings can flip sign arbitrarily)
         if np.sum(loadings) < 0: loadings = -loadings
         weights_df.iloc[i] = loadings
     return weights_df.ffill().fillna(1.0 / len(cols))
@@ -487,16 +535,23 @@ def compute_garch_rolling(ew_index_df, reestimate_freq=GARCH_REFIT_FREQ, burn_in
 def calculate_signal_agreement(df, cols):
     return (np.sign(df[cols]).sum(axis=1) / len(cols)).abs()
 
+# Converts raw health scores into binary 0/1 signals using Volatility-Weighted Hysteresis
+# Hysteresis prevents 'flickering' signals by requiring a minimum score to turn ON and a negative score to turn OFF
 def apply_vol_weighted_hysteresis(scores, vol_series, consensus_series=None, base_buffer=BASE_BUFFER, min_hold=MIN_HOLD):
     states = np.zeros(len(scores)); last_state = 0; days_held = 0
+    # Increase the required gap (buffer) when market volatility is high
     vol_mult = (vol_series / vol_series.rolling(252).mean()).fillna(1.0)
     for i in range(len(scores)):
         score = scores.iloc[i] if hasattr(scores, "iloc") else scores[i]
         buff = base_buffer * vol_mult.iloc[i]
+        # Reduce buffer if multiple sub-features agree on the direction
         if consensus_series is not None: buff *= (2.0 - consensus_series.iloc[i])
+        
         new_state = last_state
         if score > buff: new_state = 1
         elif score < -buff: new_state = 0
+        
+        # Enforce a minimum holding period to filter out noise
         if new_state != last_state:
             if days_held < min_hold: new_state = last_state; days_held += 1
             else: days_held = 1
@@ -764,22 +819,27 @@ def compute_and_save_step4(df_vnindex, feat_matched, selected_10, ew_index, labe
 # ============================================================
 # MAIN
 # ============================================================
+# ============================================================
+# MAIN PIPELINE EXECUTION
+# ============================================================
 if __name__ == "__main__":
     load_dotenv()
-    base_out = os.path.join(os.path.dirname(__file__), "..", "output")
+    # Save outputs in the current application directory
+    base_out = os.path.dirname(__file__)
     for d in ["step1_features", "step2_w1_scores", "step3_component_selection", "step4_market_health_index"]:
         os.makedirs(os.path.join(base_out, d), exist_ok=True)
     
-    print("Fetching data...")
+    print("Fetching data from QuestDB...")
     univ100 = load_vn100_universe(); univ30 = load_vn30_universe()
-    df100 = load_universe_prices(univ100); df30 = load_universe_prices(univ30)
+    df100 = load_universe_prices(univ100, label="VN100"); df30 = load_universe_prices(univ30, label="VN30")
     vnidx = load_vnindex(); bond = load_govbond(); mflow = load_money_flow(); foreign = load_foreign_trading(); prop = load_proprietary_trading()
     
+    # Handle time-varying membership for VN30 and VN100
     max_dt = vnidx["timestamp"].max()
     map100 = build_membership_map(univ100, max_dt); map30 = build_membership_map(univ30, max_dt)
     ew30 = build_ew_index(df30, map30); ew100 = build_ew_index(df100, map100)
     
-    print("Computing pillars...")
+    print("Computing the 8 Major Pillars...")
     b = measure_market_breadth(df30, map30).rename(columns={"breadth": "breadth_z"})
     mom = measure_momentum(ew30).rename(columns={"momentum": "momentum_z"})
     sent = measure_sentiment(vnidx, df100, bond).rename(columns={"sentiment": "sentiment_z"})
@@ -789,13 +849,23 @@ if __name__ == "__main__":
     pf = measure_institutional_flow(prop, label="prop").rename(columns={"prop_flow": "prop_flow_z"})
     disp = measure_dispersion_index(df100, map100).rename(columns={"dispersion": "dispersion_z"})
     
-    df_p = pd.concat([b, mom, sent, cyc, mf, ff, pf, disp], axis=1).ffill().dropna()
+    # Merge all pillars. We fill missing history (e.g., Prop flow) with 0 
+    # to ensure the timeline starts in 2016, not just when the newest table starts.
+    df_p = pd.concat([b, mom, sent, cyc, mf, ff, pf, disp], axis=1).ffill().fillna(0).dropna()
     df_z = winsorize_features(compute_z_score(winsorize_features(df_p)))
-    # Add raw columns for sub-feature computation
+    
+    # Add raw columns for specific sub-feature logic
     df_z["breadth"] = b["breadth_z"].reindex(df_z.index).ffill()
     
+    # STEP 1: Generate 20+ candidate sub-features (slopes, means, crosses)
     feat_df = compute_and_save_step1(df_z, ew30, os.path.join(base_out, "step1_features"))
+    
+    # STEP 2: Use Wasserstein Distance (W1) to score features against historical Bull regimes
     w1_df, f_m, l_m = compute_and_save_step2(feat_df, vnidx, os.path.join(base_out, "step2_w1_scores"))
+    
+    # STEP 3: Select the top 10 most predictive features based on W1 and deduplication
     sel_10 = compute_and_save_step3(w1_df, f_m, os.path.join(base_out, "step3_component_selection"))
+    
+    # STEP 4: Build Composite Health Index using PCA and generate visual/text signals
     compute_and_save_step4(vnidx, f_m, sel_10, ew100, l_m, os.path.join(base_out, "step4_market_health_index"))
     print("DONE.")
