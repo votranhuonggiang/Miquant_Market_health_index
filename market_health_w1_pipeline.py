@@ -31,14 +31,16 @@ BASE_BUFFER = 0.5
 MIN_HOLD = 5
 
 pillar_map = {
-    "breadth":    ["breadth_mean20", "breadth_stability", "breadth_pct_high"],
-    "momentum":   ["momentum_mean20", "momentum_signflip20", "ema50_dist"],
-    "sentiment":  ["sentiment_mean20", "sentiment_mania_pct", "sentiment_breadth_cross"],
-    "cycle":      ["cycle_mean20", "cycle_skew", "cycle_flow_cross"],
-    "money_flow": ["mflow_mean50", "mflow_slope20", "flow_composite"],
-    "foreign":    ["fflow_mean50", "fflow_neg_pct"],
-    "prop":       ["pflow_mean50", "pflow_consec_neg"],
-    "dispersion": ["dispersion_mean20", "dispersion_spike_pct", "dispersion_vol_ratio"],
+    "trading_above_ema_breadth": ["breadth_mean20", "breadth_stability", "breadth_pct_high"],
+    "mcclellan_osc_breadth":     ["mcclellan_osc"],
+    "mcclellan_summation_breadth": ["mcclellan_summation"],
+    "momentum":                  ["momentum_mean20", "momentum_signflip20", "ema50_dist"],
+    "sentiment":                 ["sentiment_mean20", "sentiment_mania_pct", "sentiment_breadth_cross"],
+    "cycle":                     ["cycle_mean20", "cycle_skew", "cycle_flow_cross"],
+    "money_flow":                ["mflow_mean50", "mflow_slope20", "flow_composite"],
+    "foreign":                   ["fflow_mean50", "fflow_neg_pct"],
+    "prop":                      ["pflow_mean50", "pflow_consec_neg"],
+    "dispersion":                ["dispersion_mean20", "dispersion_spike_pct", "dispersion_vol_ratio"],
 }
 
 # ============================================================
@@ -310,7 +312,7 @@ def define_bull_base_labels(df_price, lambda_value=DAILY_LAMBDA):
     df = df_price.copy()
     if "timestamp" in df.columns:
         df = df.set_index("timestamp")
-    df.index = pd.to_datetime(df.index, utc=True)
+    df.index = pd.to_datetime(df.index).tz_localize(None)
     df = df.sort_index()
     return detect_regime(df["close"], lambda_value)
 
@@ -332,7 +334,101 @@ def measure_market_breadth(vn100_df, membership_map=None, window=50):
         breadth = aggregate_by_membership(flags, membership_map)
     else:
         breadth = flags.mean(axis=1)
-    return pd.DataFrame({"breadth": breadth}, index=breadth.index)
+    return pd.DataFrame({"trading_above_ema_breadth": breadth}, index=breadth.index)
+
+# --- Pillar: McClellan Oscillator ---
+# Ratio-Adjusted Net Advances (RANA) and its EMAs
+def measure_mcclellan_oscillator(vn100_df, output_dir=None):
+    # Calculate daily returns to identify advances and declines
+    df = vn100_df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
+    prices = df.pivot(index="timestamp", columns="symbol", values="close").sort_index().ffill()
+    rets = prices.pct_change()
+    
+    # Advances are stocks with positive returns, declines are stocks with negative returns
+    advances = (rets > 0).astype(int).sum(axis=1)
+    declines = (rets < 0).astype(int).sum(axis=1)
+    
+    # Formula 1: Ratio-Adjusted Net Advances (RANA)
+    denom = (advances + declines).replace(0, np.nan)
+    rana_raw = (advances - declines) / denom
+    rana = rana_raw * 1000
+    
+    # Formula 2: EMA (span 19 and 39)
+    ema19 = rana.ewm(span=19, adjust=False).mean()
+    ema39 = rana.ewm(span=39, adjust=False).mean()
+    
+    # Formula 3: McClellan Oscillator
+    mcclellan_osc = ema19 - ema39
+    
+    # Create the requested output DataFrame
+    df_full = pd.DataFrame({
+        "advances": advances,
+        "declines": declines,
+        "rana": rana,
+        "ema19": ema19,
+        "ema39": ema39,
+        "mcclellan_osc": mcclellan_osc
+    }, index=prices.index)
+    
+    # Save to CSV as requested
+    if output_dir:
+        df_full.to_csv(os.path.join(output_dir, "mcclellan_oscillator.csv"))
+        
+    return pd.DataFrame({"mcclellan_osc": mcclellan_osc}, index=prices.index)
+
+# --- Pillar: McClellan Summation Index ---
+# Running total of the McClellan Oscillator
+def measure_mcclellan_summation(vn100_df, output_dir=None, fill_method="none"):
+    # Calculate daily returns to identify advances and declines
+    df = vn100_df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
+    prices = df.pivot(index="timestamp", columns="symbol", values="close").sort_index().ffill()
+    rets = prices.pct_change()
+    
+    # Advances are stocks with positive returns, declines are stocks with negative returns
+    advances = (rets > 0).astype(int).sum(axis=1)
+    declines = (rets < 0).astype(int).sum(axis=1)
+    
+    # Formula 1: Ratio-Adjusted Net Advances (RANA)
+    denom = (advances + declines).replace(0, np.nan)
+    rana_raw = (advances - declines) / denom
+    rana = rana_raw * 1000
+    
+    # Formula 2: EMA (span 19 and 39)
+    ema19 = rana.ewm(span=19, adjust=False).mean()
+    ema39 = rana.ewm(span=39, adjust=False).mean()
+    
+    # Formula 3: McClellan Oscillator
+    mcclellan_osc = ema19 - ema39
+    
+    # Formula 4: McClellan Summation Index (MSI)
+    # first MSI value equals the first non-NaN mcclellan_osc
+    # thereafter: MSI_t = MSI_{t-1} + mcclellan_osc_t
+    mcclellan_summation = mcclellan_osc.cumsum()
+    
+    if fill_method == "none":
+        # Keep NaN where oscillator is NaN
+        mcclellan_summation = mcclellan_summation.where(mcclellan_osc.notna())
+    elif fill_method == "ffill":
+        mcclellan_summation = mcclellan_summation.ffill()
+
+    # Create the requested output DataFrame
+    df_full = pd.DataFrame({
+        "advances": advances,
+        "declines": declines,
+        "rana": rana,
+        "ema19": ema19,
+        "ema39": ema39,
+        "mcclellan_osc": mcclellan_osc,
+        "mcclellan_summation": mcclellan_summation
+    }, index=prices.index)
+    
+    # Save to CSV as requested
+    if output_dir:
+        df_full.to_csv(os.path.join(output_dir, "mcclellan_summation_index.csv"))
+        
+    return pd.DataFrame({"mcclellan_summation": mcclellan_summation}, index=prices.index)
 
 # --- Pillar: Momentum ---
 # Measures trend momentum using MACD Histogram of an Equal-Weighted index
@@ -405,7 +501,9 @@ def measure_market_cycle(vn_df, membership_map=None):
         s = pd.Series(0.0, index=kst.index)
         s[(kst >= 0) & (dk > 0)] = 1.0; s[(kst < 0) & (dk > 0)] = 0.5; s[(kst >= 0) & (dk < 0)] = -0.5; s[(kst < 0) & (dk < 0)] = -1.0
         return s
-    prices = vn_df.pivot(index="timestamp", columns="symbol", values="close").ffill()
+    df = vn_df.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
+    prices = df.pivot(index="timestamp", columns="symbol", values="close").ffill()
     seasons = pd.DataFrame(index=prices.index)
     for col in prices.columns: seasons[col] = _season(_get_kst(prices[col]))
     market_cycle = aggregate_by_membership(seasons, membership_map) if membership_map else seasons.mean(axis=1)
@@ -581,9 +679,14 @@ def _rolling_slope(series, window):
 
 def extract_candidate_features(df, ew_index_vn30=None):
     feat = pd.DataFrame(index=df.index)
-    feat["breadth_mean20"] = df["breadth_z"].rolling(20, min_periods=5).mean()
-    feat["breadth_stability"] = 1 - df["breadth_z"].rolling(20, min_periods=5).std()
-    feat["breadth_pct_high"] = (df["breadth"] > 0.60).astype(float).rolling(20, min_periods=5).mean() if "breadth" in df.columns else 0
+    # Breadth - Trading Above EMA
+    feat["breadth_mean20"] = df["trading_above_ema_breadth_z"].rolling(20, min_periods=5).mean()
+    feat["breadth_stability"] = 1 - df["trading_above_ema_breadth_z"].rolling(20, min_periods=5).std()
+    feat["breadth_pct_high"] = (df["trading_above_ema_breadth"] > 0.60).astype(float).rolling(20, min_periods=5).mean() if "trading_above_ema_breadth" in df.columns else 0
+    # Breadth - McClellan Oscillator
+    feat["mcclellan_osc"] = df["mcclellan_osc_breadth_z"]
+    feat["mcclellan_summation"] = df["mcclellan_summation_breadth_z"]
+    
     feat["momentum_mean20"] = df["momentum_z"].rolling(20, min_periods=5).mean()
     feat["momentum_signflip20"] = (np.sign(df["momentum_z"]).diff() != 0).astype(float).rolling(20, min_periods=5).sum()
     feat["sentiment_mean20"] = df["sentiment_z"].rolling(20, min_periods=5).mean()
@@ -605,13 +708,21 @@ def extract_candidate_features(df, ew_index_vn30=None):
         feat["ema50_dist"] = ((ew["close"] - ema50) / ema50).reindex(df.index).ffill()
     else: feat["ema50_dist"] = df["momentum_z"]
     feat["flow_composite"] = (df["money_flow_z"] + df["foreign_flow_z"] + df["prop_flow_z"]) / 3.0
-    feat["sentiment_breadth_cross"] = df["sentiment_z"] * df["breadth_z"]
+    feat["sentiment_breadth_cross"] = df["sentiment_z"] * df["trading_above_ema_breadth_z"]
     feat["cycle_flow_cross"] = df["market_cycle_z"] * feat["flow_composite"]
     feat["dispersion_vol_ratio"] = df["dispersion_z"] / (df["volatility"].clip(lower=1e-6) + 1) if "volatility" in df.columns else df["dispersion_z"]
     return feat
 
 def compute_wasserstein_scores(feat_df, labels):
+    if feat_df.empty or labels.empty:
+        print("  WARNING: feat_df or labels is empty in compute_wasserstein_scores")
+        return pd.DataFrame(columns=["feature", "w1_score", "w1_normalized", "status", "std"])
+    
     idx = feat_df.index.intersection(labels.index)
+    if len(idx) == 0:
+        print("  WARNING: No overlapping index between features and labels")
+        return pd.DataFrame(columns=["feature", "w1_score", "w1_normalized", "status", "std"])
+        
     feat_df, labels = feat_df.loc[idx], labels.loc[idx]
     w1_p = (labels == 1).sum() / len(labels); w0_p = 1 - w1_p
     rows = []
@@ -664,7 +775,7 @@ def compute_and_save_step2(feat_df, df_vnindex, output_dir):
     print("--- STEP 2: Compute W1 Scores ---")
     labels = define_bull_base_labels(df_vnindex, lambda_value=DAILY_LAMBDA)
     labels.name = "market_trend_regime"
-    df_vn = df_vnindex.copy().set_index("timestamp"); df_vn.index = pd.to_datetime(df_vn.index, utc=True)
+    df_vn = df_vnindex.copy().set_index("timestamp"); df_vn.index = pd.to_datetime(df_vn.index).tz_localize(None)
     df_vn = df_vn.join(labels, how="inner")
     df_vn[["market_trend_regime", "close"]].rename(columns={"close":"vnindex_close"}).to_csv(os.path.join(output_dir, "step2_bull_labels.csv"))
     
@@ -683,9 +794,12 @@ def compute_and_save_step2(feat_df, df_vnindex, output_dir):
     scores_df, kept = deduplicate_by_correlation(scores_df, feat_df.loc[common])
     
     def get_comp(f):
+        # Match base pillar names (e.g., breadth_z) or sub-features
+        base_p = f.replace("_z", "")
+        if base_p in pillar_map: return base_p
         for k, v in pillar_map.items():
             if f in v: return k
-        return "unknown"
+        return f
     scores_df["component"] = scores_df["feature"].apply(get_comp)
     scores_df.to_csv(os.path.join(output_dir, "step2_w1_scores_all_features.csv"), index=False)
     
@@ -711,27 +825,44 @@ def compute_and_save_step2(feat_df, df_vnindex, output_dir):
 # ============================================================
 
 def compute_and_save_step3(w1_df, feat_matched, output_dir):
-    print("--- STEP 3: Component Selection ---")
-    comp_scores = w1_df[w1_df["status"] != "Skipped"].groupby("component")["w1_score"].max().sort_values(ascending=False).reset_index()
-    comp_scores["rank"] = range(1, len(comp_scores) + 1); comp_scores["selected"] = comp_scores["rank"] <= 5
-    comp_scores.to_csv(os.path.join(output_dir, "step3_component_w1_scores.csv"), index=False)
+    print("--- STEP 3: Top 5 Component Selection ---")
     
-    plt.figure(figsize=(10, 6)); plt.barh(comp_scores["component"][::-1], comp_scores["w1_score"][::-1], color=["#27ae60" if s else "#bdc3c7" for s in comp_scores["selected"][::-1]])
-    plt.tight_layout(); plt.savefig(os.path.join(output_dir, "step3_component_ranking.png")); plt.close()
+    # Filter only 'Kept' features/components and take the top 5 based on W1 score
+    kept_df = w1_df[w1_df["status"] == "Kept"]
     
-    top5 = comp_scores[comp_scores["selected"]]["component"].tolist()
-    final_feats = [w1_df[(w1_df["component"] == c) & (w1_df["status"] != "Skipped")].head(2) for c in top5]
-    final_df = pd.concat(final_feats).sort_values("w1_score", ascending=False)
+    # Fallback: if 'Kept' is empty, try 'Skipped' or any just to avoid crashing later steps
+    if kept_df.empty:
+        print("  WARNING: No features were 'Kept' by W1/Correlation filters. Falling back to all unscored pillars.")
+        final_df = w1_df.head(5).copy()
+    else:
+        final_df = kept_df.head(5).copy()
+        
     final_df["overall_rank"] = range(1, len(final_df) + 1)
-    final_df[["overall_rank", "component", "feature", "w1_score", "w1_normalized"]].to_csv(os.path.join(output_dir, "step3_selected_10_features.csv"), index=False)
     
-    fig, axes = plt.subplots(5, 2, figsize=(15, 20))
+    # Save the selected components list
+    final_df[["overall_rank", "component", "feature", "w1_score", "w1_normalized"]].to_csv(
+        os.path.join(output_dir, "step3_selected_5_components.csv"), index=False
+    )
+    
+    # Visualization of the top 5 selected components
+    fig, axes = plt.subplots(3, 2, figsize=(15, 12))
     axes = axes.flatten()
     for i, (_, r) in enumerate(final_df.iterrows()):
-        axes[i].plot(feat_matched.index, feat_matched[r["feature"]])
-        axes[i].set_title(f"{r['feature']} (W1: {r['w1_score']:.3f})")
-    plt.tight_layout(); plt.savefig(os.path.join(output_dir, "step3_selected_features_grid.png")); plt.close()
-    return final_df["feature"].tolist()
+        if i < len(axes):
+            axes[i].plot(feat_matched.index, feat_matched[r["feature"]], color="#27ae60")
+            axes[i].set_title(f"Rank {r['overall_rank']}: {r['feature']}\n(Pillar: {r['component']} | W1: {r['w1_score']:.4f})", fontsize=10)
+            axes[i].grid(True, alpha=0.2)
+    
+    for j in range(len(final_df), len(axes)):
+        fig.delaxes(axes[j])
+        
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "step3_selected_components_grid.png"))
+    plt.close()
+    
+    selected_list = final_df["feature"].tolist()
+    print(f"  Selected Top {len(selected_list)} Components: {selected_list}")
+    return selected_list
 
 # ============================================================
 # STEP 4: compute_and_save_step4(df, feat_df, selected_10, ew_index, labels, output_dir)
@@ -764,7 +895,7 @@ def compute_and_save_step4(df_vnindex, feat_matched, selected_10, ew_index, labe
     signal = apply_vol_weighted_hysteresis(composite, vol, consensus_series=agr)
     
     final_df = df_z.copy(); final_df["composite_health"] = composite; final_df["volatility"] = vol; final_df["agreement"] = agr; final_df["health_signal_final"] = signal; final_df["market_trend_regime"] = labels_matched.reindex(final_df.index).ffill()
-    vn_c = df_vnindex.copy().set_index("timestamp"); vn_c.index = pd.to_datetime(vn_c.index, utc=True)
+    vn_c = df_vnindex.copy().set_index("timestamp"); vn_c.index = pd.to_datetime(vn_c.index).tz_localize(None)
     final_df["vnindex_close"] = vn_c["close"].reindex(final_df.index).ffill()
     final_df.to_csv(os.path.join(output_dir, "step4_market_health_final.csv"))
     
@@ -839,8 +970,11 @@ if __name__ == "__main__":
     map100 = build_membership_map(univ100, max_dt); map30 = build_membership_map(univ30, max_dt)
     ew30 = build_ew_index(df30, map30); ew100 = build_ew_index(df100, map100)
     
-    print("Computing the 8 Major Pillars...")
-    b = measure_market_breadth(df30, map30).rename(columns={"breadth": "breadth_z"})
+    print("Computing the 10 Major Pillars...")
+    b = measure_market_breadth(df30, map30).rename(columns={"trading_above_ema_breadth": "trading_above_ema_breadth_z"})
+    mcc = measure_mcclellan_oscillator(df100, base_out).rename(columns={"mcclellan_osc": "mcclellan_osc_breadth_z"})
+    mcc["mcclellan_osc_breadth_z"] = mcc["mcclellan_osc_breadth_z"].rolling(20, min_periods=5).mean()
+    msi = measure_mcclellan_summation(df100, base_out).rename(columns={"mcclellan_summation": "mcclellan_summation_breadth_z"})
     mom = measure_momentum(ew30).rename(columns={"momentum": "momentum_z"})
     sent = measure_sentiment(vnidx, df100, bond).rename(columns={"sentiment": "sentiment_z"})
     cyc = measure_market_cycle(df100, map100).rename(columns={"market_cycle": "market_cycle_z"})
@@ -851,21 +985,26 @@ if __name__ == "__main__":
     
     # Merge all pillars. We fill missing history (e.g., Prop flow) with 0 
     # to ensure the timeline starts in 2016, not just when the newest table starts.
-    df_p = pd.concat([b, mom, sent, cyc, mf, ff, pf, disp], axis=1).ffill().fillna(0).dropna()
+    # CRITICAL: Ensure all indexes are timezone-naive datetime objects to prevent concat fragmentation or plotting errors
+    for comp in [b, mcc, msi, mom, sent, cyc, mf, ff, pf, disp]:
+        comp.index = pd.to_datetime(comp.index).tz_localize(None)
+        
+    df_p = pd.concat([b, mcc, msi, mom, sent, cyc, mf, ff, pf, disp], axis=1).ffill().fillna(0).dropna()
     df_z = winsorize_features(compute_z_score(winsorize_features(df_p)))
     
     # Add raw columns for specific sub-feature logic
-    df_z["breadth"] = b["breadth_z"].reindex(df_z.index).ffill()
+    df_z["trading_above_ema_breadth"] = b["trading_above_ema_breadth_z"].reindex(df_z.index).ffill()
     
     # STEP 1: Generate 20+ candidate sub-features (slopes, means, crosses)
     feat_df = compute_and_save_step1(df_z, ew30, os.path.join(base_out, "step1_features"))
     
-    # STEP 2: Use Wasserstein Distance (W1) to score features against historical Bull regimes
-    w1_df, f_m, l_m = compute_and_save_step2(feat_df, vnidx, os.path.join(base_out, "step2_w1_scores"))
+    # STEP 2: Use Wasserstein Distance (W1) to score COMPONENTS (not sub-features) against Bull regimes
+    # We only score the 9 Z-scored pillars to avoid redundancy with raw proxy columns used for sub-feature logic
+    w1_df, f_m, l_m = compute_and_save_step2(df_z[df_p.columns], vnidx, os.path.join(base_out, "step2_w1_scores"))
     
-    # STEP 3: Select the top 10 most predictive features based on W1 and deduplication
-    sel_10 = compute_and_save_step3(w1_df, f_m, os.path.join(base_out, "step3_component_selection"))
+    # STEP 3: Select the top 5 most predictive components (pillars) based on W1
+    sel_5 = compute_and_save_step3(w1_df, f_m, os.path.join(base_out, "step3_component_selection"))
     
     # STEP 4: Build Composite Health Index using PCA and generate visual/text signals
-    compute_and_save_step4(vnidx, f_m, sel_10, ew100, l_m, os.path.join(base_out, "step4_market_health_index"))
+    compute_and_save_step4(vnidx, f_m, sel_5, ew100, l_m, os.path.join(base_out, "step4_market_health_index"))
     print("DONE.")
