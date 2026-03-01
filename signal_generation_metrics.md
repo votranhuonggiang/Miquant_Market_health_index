@@ -8,61 +8,61 @@ Below is a structured framework used by quantitative researchers to operationali
 
 | **Factor**                       | **Metrics**                        | **Meaning**                                       | **Measure (Quant Implementation)**                                              |
 | -------------------------------- | ---------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------- |
-| **1. Strength of Current Trend** | Moving Average Slope               | Measures directional persistence                  | β from OLS regression of log price on time over last N periods; or ΔMA(N)/MA(N) |
-|                                  | Moving Average Alignment           | Confirms multi-horizon agreement                  | 20MA > 50MA > 200MA (bullish regime dummy = 1)                                  |
-|                                  | ADX (Average Directional Index)    | Measures trend strength independent of direction  | ADX(14); strong trend if ADX > 25                                               |
-|                                  | Price Distance from Long MA        | Quantifies extension relative to structural trend | (P − MA200) / MA200                                                             |
-|                                  | R² of Trend Regression             | Measures goodness-of-fit of trend                 | R² from regression of log price over rolling window                             |
-|                                  | Higher High / Higher Low Structure | Confirms structural trend                         | Rolling max/min comparison over last k swings                                   |
-|                                  | Volume Trend Confirmation          | Confirms participation                            | OBV slope; Volume / Volume MA(20)                                               |
-|                                  | MACD Histogram                     | Measures momentum strength                        | MACD(12,26) − Signal(9)                                                         |
-|                                  | Relative Strength vs Benchmark     | Measures cross-sectional leadership               | RS = Asset return − Index return over N periods                                 |
-|                                  | Volatility-Adjusted Return         | Quality of trend                                  | Sharpe-like: mean return / std dev over rolling window                          |
+| **1. Strength of Current Trend** | `f1_ma_slope` (MA Slope)          | Measures directional persistence                  | β from rolling OLS of log price on time over last 20 periods                   |
+|                                  | `f1_r2_trend` (R² Trend)          | Measures goodness-of-fit of trend                 | R² from rolling OLS of log price on time over last 20 periods                  |
+|                                  | `f1_ma_alignment` (Alignment)     | Confirms multi-horizon agreement                  | Boolean: EMA20 > EMA50 > EMA200                                                |
+|                                  | `f1_adx` (ADX)                    | Measures trend strength independent of direction  | ADX(14) calculated on market-wide synthetic OHLC (VN100 mean)                   |
+|                                  | `f1_dist_long_ma` (Long MA Dist)  | Quantifies extension relative to structural trend | (Price − EMA200) / EMA200                                                      |
+|                                  | `f1_hh_hl` (HH/HL Structure)      | Confirms structural trend                         | Boolean: Price > 20d Max AND 5d Min > 20d Min                                  |
+|                                  | `f1_vol_confirm` (Vol. Confirm)   | Confirms participation                            | Total market volume / 20d Moving Average of volume                             |
+|                                  | `f1_macd_hist` (MACD Hist)        | Measures momentum strength                        | MACD(12,26) − Signal(9)                                                        |
+|                                  | `f1_rel_strength` (Rel. Strength) | Measures leadership vs benchmark                  | 20d return of Asset − 20d return of VNINDEX                                    |
+|                                  | `f1_vol_adj_ret` (Sharpe Proxy)   | Quality of trend                                  | 20d mean return / 20d return standard deviation                                |
 
 ---
 
 | **Factor**                       | **Metrics**             | **Meaning**                             | **Measure (Quant Implementation)**                |
 | -------------------------------- | ----------------------- | --------------------------------------- | ------------------------------------------------- |
-| **2. Maturity / Stage of Trend** | RSI Level               | Identifies overbought/oversold maturity | RSI(14); >70 late bull phase                      |
-|                                  | Distance from Short MA  | Measures short-term overextension       | (P − MA20)/MA20                                   |
-|                                  | ATR Expansion           | Late-stage volatility expansion         | ATR(14) / ATR(50)                                 |
-|                                  | Momentum Divergence     | Detects weakening internal momentum     | Price makes HH while RSI makes LH                 |
-|                                  | Bollinger Band Position | Measures expansion phase                | (P − LowerBB) / (UpperBB − LowerBB)               |
-|                                  | Parabolic SAR Distance  | Late acceleration stage                 | Distance between price and SAR                    |
-|                                  | Time Since Breakout     | Aging of trend                          | Bars since last 50-day high breakout              |
-|                                  | Hurst Exponent          | Trend persistence regime                | H > 0.5 trending, declining H suggests exhaustion |
-|                                  | Rolling Skewness        | Late euphoric stage often right-skewed  | Skewness of returns over N                        |
-|                                  | Volume Climax Indicator | Distribution phase signal               | Volume spike > 2σ above mean                      |
+| **2. Maturity / Stage of Trend** | `f2_rsi` (RSI Level)              | Identifies overbought/oversold maturity | RSI(14) of the VN100 EW Index                                     |
+|                                  | `f2_dist_short_ma` (Short MA Dist)| Measures short-term overextension       | (Price − EMA20) / EMA20                                           |
+|                                  | `f2_atr_expansion` (ATR Exp.)     | Late-stage volatility expansion         | ATR(14) / ATR(50)                                                 |
+|                                  | `f2_mom_divergence` (Divergence)  | Detects weakening internal momentum     | Boolean: Price HH(20) while RSI < rolling 20d RSI max             |
+|                                  | `f2_bb_position` (BB Pos)         | Measures expansion phase                | (Price − LowerBB) / (UpperBB − LowerBB) [20d, 2σ]                 |
+|                                  | `f2_sar_dist` (SAR Dist)          | Late acceleration stage                 | (Price − 10d Min) / 10d std deviation                             |
+|                                  | `f2_time_since_breakout` (Age)    | Aging of trend                          | Index of max price in rolling 50-day window                       |
+|                                  | `f2_hurst_proxy` (Hurst Proxy)    | Trend persistence regime                | Lag-1 autocorrelation of 100-day returns                          |
+|                                  | `f2_rolling_skew` (Skewness)      | Euphoria/Exhaustion signal              | Rolling 63-day skewness of returns                                |
+|                                  | `f2_vol_climax` (Vol. Climax)     | Distribution phase signal               | Boolean: Volume > 50d Mean + 2σ                                   |
 
 ---
 
 | **Factor**                                  | **Metrics**                       | **Meaning**                          | **Measure (Quant Implementation)**           |
 | ------------------------------------------- | --------------------------------- | ------------------------------------ | -------------------------------------------- |
-| **3. Reward-to-Risk Ratio of New Position** | ATR-based Stop Distance           | Defines volatility-adjusted downside | Stop = Entry − k × ATR(14)                   |
-|                                             | Recent Swing Low Distance         | Structural invalidation level        | Entry − recent support                       |
-|                                             | Expected Move vs Stop             | Asymmetric payoff estimate           | Target distance / Stop distance              |
-|                                             | Risk-Adjusted Trend Strength      | Expected return relative to vol      | Trend slope / realized volatility            |
-|                                             | Implied Volatility (if available) | Market pricing of risk               | IV percentile rank                           |
-|                                             | Maximum Adverse Excursion (MAE)   | Historical drawdown profile          | Average MAE of similar setups                |
-|                                             | Downside Volatility               | Asymmetric risk measure              | Std dev of negative returns                  |
-|                                             | Expected Breakout Projection      | Measured move target                 | Height of base projected upward              |
-|                                             | Kelly Fraction Proxy              | Optimal capital sizing               | Edge / Variance estimate                     |
-|                                             | Value-at-Risk (VaR)               | Statistical risk bound               | Quantile (5%) of rolling return distribution |
+| **3. Reward-to-Risk Ratio**      | `f3_atr_stop_dist` (ATR Stop)     | Defines volatility-adjusted downside | ATR(14) / Price                                         |
+|                                  | `f3_swing_low_dist` (Swing Low)   | Structural invalidation level        | (Price − 20d Min) / Price                               |
+|                                  | `f3_expected_move_ratio` (E/M)    | Asymmetric payoff estimate           | (20d Max − Price) / (Price − 20d Min)                   |
+|                                  | `f3_risk_adj_trend` (Risk-Adj)    | Expected return relative to vol      | `f1_ma_slope` / 20d return standard deviation           |
+|                                  | `f3_hist_vol_rank` (Vol Rank)     | Market pricing of risk               | 252d percentile rank of 20d realized volatility         |
+|                                  | `f3_mae` (MAE)                    | Historical drawdown profile          | (Price − 20d Max) / 20d Max                             |
+|                                  | `f3_downside_vol` (Downside Vol)  | Asymmetric risk measure              | 20d standard deviation of negative returns              |
+|                                  | `f3_breakout_proj` (Proj. Move)   | Measured move target                 | (20d Max − 20d Min) / Price                             |
+|                                  | `f3_kelly_proxy` (Kelly Proxy)    | Optimal capital sizing               | 63d mean return / (63d return variance + 1e-6)          |
+|                                  | `f3_var_5pct` (VaR)               | Statistical risk bound               | 5% quantile of rolling 63-day returns                   |
 
 ---
 
 | **Factor**                                          | **Metrics**                    | **Meaning**                 | **Measure (Quant Implementation)**          |
 | --------------------------------------------------- | ------------------------------ | --------------------------- | ------------------------------------------- |
-| **4. Potential Entry Levels for New Long Position** | Breakout Level                 | Structural confirmation     | Close > rolling 50-day high                 |
-|                                                     | Pullback to MA                 | Mean-reversion within trend | Price near MA20 or MA50                     |
-|                                                     | Fibonacci Retracement          | Support zone within trend   | 38.2%–61.8% retracement level               |
-|                                                     | Volume Confirmation            | Institutional participation | Breakout volume > 1.5× avg volume           |
-|                                                     | Volatility Contraction Pattern | Energy build-up             | Declining ATR and narrowing Bollinger Bands |
-|                                                     | VWAP Support                   | Fair value entry            | Price near anchored VWAP                    |
-|                                                     | Support Confluence             | Multi-signal alignment      | Overlap of MA + horizontal support          |
-|                                                     | RSI Reset                      | Momentum cooldown           | RSI returns from >70 to 50–60               |
-|                                                     | Donchian Channel Break         | Systematic entry trigger    | Close > 20-day high                         |
-|                                                     | Market Regime Filter           | Macro alignment             | Index above 200MA                           |
+| **4. Potential Entry Levels**    | `f4_breakout_level` (Breakout)    | Structural confirmation     | Boolean: Price >= rolling 50-day high           |
+|                                  | `f4_pullback_ma` (MA Pullback)    | Mean-reversion within trend | 1 / (1 + abs(Price − EMA50) / EMA50)            |
+|                                  | `f4_fib_retracement` (Fib 61.8)   | Support zone within trend   | (Price − 20d Min) / (20d Max − 20d Min)         |
+|                                  | `f4_vol_confirmation` (Vol Conf)  | Institutional participation | Boolean: Vol > 1.5× 20d avg AND Price > Prev.   |
+|                                  | `f4_vol_contraction` (Narrow)     | Energy build-up             | 1 / clip(ATR14/ATR50, min=0.1)                  |
+|                                  | `f4_vwap_dist` (VWAP Dist)        | Fair value entry            | (Price − Monthly VWAP Proxy) / VWAP Proxy       |
+|                                  | `f4_confluence` (MA Confluence)   | Multi-signal alignment      | Mean proximity score to EMA20, EMA50, EMA200    |
+|                                  | `f4_rsi_reset` (RSI Reset)        | Momentum cooldown           | Boolean: RSI(14) returns from >70 to [50, 60]   |
+|                                  | `f4_donchian_break` (Donchian)    | Systematic entry trigger    | Boolean: Price > Prev 20d Max                   |
+|                                  | `f4_market_regime` (Regime)       | Macro alignment             | Boolean: VNINDEX > EMA200 of VNINDEX            |
 
 ---
 
