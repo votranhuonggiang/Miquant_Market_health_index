@@ -3,6 +3,7 @@ import numpy as np
 import os
 import requests
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from arch import arch_model
@@ -17,8 +18,9 @@ warnings.filterwarnings("ignore")
 PCA_WINDOW = 252
 GARCH_BURN_IN = 252
 GARCH_REFIT_FREQ = 63
-BASE_BUFFER = 1
-MIN_HOLD = 15
+BASE_BUFFER = 0.5
+MIN_HOLD = 5
+WEIGHTS_PLOT_START = "2020-01-01" # Start date for the Features & Weights chart
 
 def query_questdb(sql_query):
     host = os.environ.get("QUEST_DB_URL", "http://localhost:9000")
@@ -224,6 +226,11 @@ if __name__ == "__main__":
     for f in selected_cols:
         # Re-apply Z-score and Winsorize for the specific sample to anchor them
         ser_raw = feat_df[f].ffill()
+        
+        # Invert market_volatility because higher volatility is negative for health
+        if f == "market_volatility":
+            ser_raw = ser_raw * -1
+            
         ser_z = compute_z_score(ser_raw)
         ser_clean = winsorize_features(pd.DataFrame({f: ser_z}))[f]
         processed_feats[f] = ser_clean
@@ -247,7 +254,9 @@ if __name__ == "__main__":
     df_z = pd.DataFrame(processed_feats).ffill().fillna(0)
     
     # Calculate Health Score Components
+    print("Computing dynamic PCA weights...")
     weights_df = compute_pca_weights(df_z, selected_cols)
+    
     composite_health = (df_z * weights_df[selected_cols]).sum(axis=1)
     
     # 2. Get Volatility for Hysteresis
@@ -277,37 +286,43 @@ if __name__ == "__main__":
     
     final_df = pd.DataFrame({
         "vnindex_close": vn_c["close"].reindex(composite_health.index).ffill(),
+        "vn100_ew_close": ew_index["close"].reindex(composite_health.index).ffill(),
         "composite_health": composite_health,
         "health_signal": health_signal,
         "volatility": vol_series,
         "agreement": agreement
     }, index=composite_health.index)
     
-    # Add the constituent feature Z-scores
+    # Add the constituent feature Z-scores, dynamic weights, and their contributions
+    contribution_cols = []
     for col in selected_cols:
         final_df[col] = df_z[col]
+        final_df[f"w_{col}"] = weights_df[col]
+        contrib_name = f"contrib_{col}"
+        final_df[contrib_name] = df_z[col] * weights_df[col]
+        contribution_cols.append(contrib_name)
         
     final_df.to_csv(os.path.join(output_dir, "step4_market_health_final.csv"))
     
     # 5. Visualization
     print("Generating charts...")
-    plot_df = final_df[final_df.index >= "2024-01-01"]
+    plot_df = final_df[final_df.index >= "2020-01-01"]
     if plot_df.empty: plot_df = final_df.tail(252)
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), gridspec_kw={'height_ratios': [2, 1]}, sharex=True)
     
-    # Top Plot: VNINDEX with Signal Background
-    ax1.plot(plot_df.index, plot_df["vnindex_close"], color="#2d3436", linewidth=1.5, label="VNINDEX")
+    # Top Plot: VN100 EW Index with Signal Background
+    ax1.plot(plot_df.index, plot_df["vn100_ew_close"], color="#2d3436", linewidth=1.5, label="VN100 EW Index")
     for i in range(len(plot_df)-1):
         color = "#d4edda" if plot_df["health_signal"].iloc[i] == 1 else "#f8d7da"
         ax1.axvspan(plot_df.index[i], plot_df.index[i+1], color=color, alpha=0.4, linewidth=0)
     
     flip = plot_df["health_signal"].diff()
-    ax1.scatter(plot_df[flip==1].index, plot_df[flip==1]["vnindex_close"], color="green", marker="^", s=60, label="Signal ON", zorder=5)
-    ax1.scatter(plot_df[flip==-1].index, plot_df[flip==-1]["vnindex_close"], color="red", marker="v", s=60, label="Signal OFF", zorder=5)
+    ax1.scatter(plot_df[flip==1].index, plot_df[flip==1]["vn100_ew_close"], color="green", marker="^", s=60, label="Signal ON", zorder=5)
+    ax1.scatter(plot_df[flip==-1].index, plot_df[flip==-1]["vn100_ew_close"], color="red", marker="v", s=60, label="Signal OFF", zorder=5)
     
-    ax1.set_title("VNINDEX Market Health Index (W1-Selected Features)", fontsize=16, fontweight='bold')
-    ax1.set_ylabel("VNINDEX Level")
+    ax1.set_title("VN100 EW Index Market Health (W1-Selected)", fontsize=16, fontweight='bold')
+    ax1.set_ylabel("VN100 EW Level")
     ax1.legend(loc="upper left")
     ax1.grid(True, alpha=0.2)
     
@@ -325,16 +340,123 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "step4_market_health_chart.png"), dpi=200)
     plt.close()
+
+    # 5b. Visualization with VNINDEX (New Chart)
+    print("Generating VNINDEX-based health chart...")
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), gridspec_kw={'height_ratios': [2, 1]}, sharex=True)
     
-    # 6. Weights Visualization
-    plt.figure(figsize=(12, 6))
-    weights_df[selected_cols].plot(ax=plt.gca(), linewidth=1.5, alpha=0.8)
-    plt.title("Dynamic Feature Weights (Rolling PCA Loadings)")
-    plt.ylabel("Weight")
-    plt.axhline(0, color='black', alpha=0.5)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    # Top Plot: VNINDEX with Signal Background
+    ax1.plot(plot_df.index, plot_df["vnindex_close"], color="#2d3436", linewidth=1.5, label="VNINDEX")
+    for i in range(len(plot_df)-1):
+        color = "#d4edda" if plot_df["health_signal"].iloc[i] == 1 else "#f8d7da"
+        ax1.axvspan(plot_df.index[i], plot_df.index[i+1], color=color, alpha=0.4, linewidth=0)
+    
+    flip = plot_df["health_signal"].diff()
+    ax1.scatter(plot_df[flip==1].index, plot_df[flip==1]["vnindex_close"], color="green", marker="^", s=60, label="Signal ON", zorder=5)
+    ax1.scatter(plot_df[flip==-1].index, plot_df[flip==-1]["vnindex_close"], color="red", marker="v", s=60, label="Signal OFF", zorder=5)
+    
+    ax1.set_title("VNINDEX Market Health Signal (Composite Health)", fontsize=16, fontweight='bold')
+    ax1.set_ylabel("VNINDEX Level")
+    ax1.legend(loc="upper left")
+    ax1.grid(True, alpha=0.2)
+    
+    # Bottom Plot: Health Score
+    y_vals = plot_df["composite_health"].values.astype(float)
+    ax2.plot(plot_df.index, y_vals, color="#0984e3", linewidth=1.5, label="Health Score")
+    ax2.axhline(0, color="black", linestyle="--", alpha=0.5)
+    ax2.fill_between(plot_df.index.values, 0, y_vals, where=(y_vals > 0), color="green", alpha=0.1, interpolate=True)
+    ax2.fill_between(plot_df.index.values, 0, y_vals, where=(y_vals < 0), color="red", alpha=0.1, interpolate=True)
+    ax2.set_ylabel("Composite Health Score")
+    ax2.legend(loc="upper left")
+    ax2.grid(True, alpha=0.2)
+    
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "step4_feature_weights_over_time.png"))
+    plt.savefig(os.path.join(output_dir, "step4_market_health_vnindex_chart.png"), dpi=200)
     plt.close()
     
+    # 6. Features & Weights Visualization
+    print(f"Generating features & weights chart from {WEIGHTS_PLOT_START}...")
+    plot_w_df = final_df[final_df.index >= WEIGHTS_PLOT_START]
+    if plot_w_df.empty: plot_w_df = final_df
+    
+    fig, (ax_feat, ax_weight) = plt.subplots(2, 1, figsize=(15, 12), gridspec_kw={'height_ratios': [7, 3]}, sharex=True)
+    
+    # Top Plot (70%): Constituent Features
+    plot_w_df[selected_cols].plot(ax=ax_feat, linewidth=1.2, alpha=0.8)
+    ax_feat.set_title(f"Constituent Feature Z-Scores ({WEIGHTS_PLOT_START} - Present)", fontsize=14, fontweight='bold')
+    ax_feat.set_ylabel("Z-Score")
+    ax_feat.axhline(0, color='black', linestyle='--', alpha=0.3)
+    ax_feat.grid(True, alpha=0.2)
+    ax_feat.legend(loc="upper left", fontsize='small', ncol=2)
+    
+    # Bottom Plot (30%): Dynamic Weights
+    weights_df[selected_cols].reindex(plot_w_df.index).plot(ax=ax_weight, linewidth=1.5, alpha=0.8)
+    ax_weight.set_title("Dynamic Feature Weights (Rolling PCA Loadings)", fontsize=14, fontweight='bold')
+    ax_weight.set_ylabel("Weight")
+    ax_weight.axhline(0, color='black', alpha=0.5)
+    ax_weight.grid(True, alpha=0.3)
+    ax_weight.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "step4_feature_weights_over_time.png"), dpi=200)
+    plt.close()
+    
+    # 7. Contribution Analysis Visualization (Stacked Bar)
+    print("Generating contribution analysis chart (stacked bar)...")
+    try:
+        plot_c_df = final_df[final_df.index >= "2020-01-01"].copy()
+        if plot_c_df.empty: plot_c_df = final_df.tail(252).copy()
+        
+        fig, (ax_stack, ax_health) = plt.subplots(2, 1, figsize=(15, 12), 
+                                                gridspec_kw={'height_ratios': [7, 3]}, sharex=True)
+        
+        # Top Plot (70%): Stacked Bar for Contributions
+        bottom_pos = np.zeros(len(plot_c_df), dtype=float)
+        bottom_neg = np.zeros(len(plot_c_df), dtype=float)
+        
+        colors = plt.cm.tab10(np.linspace(0, 1, len(contribution_cols)))
+        indices = plot_c_df.index
+        
+        for i, col in enumerate(contribution_cols):
+            vals = plot_c_df[col].fillna(0).astype(float).values
+            
+            pos_vals = np.where(vals > 0, vals, 0.0)
+            neg_vals = np.where(vals < 0, vals, 0.0)
+            
+            # Positive bars
+            label = col.replace("contrib_", "")
+            ax_stack.bar(indices, pos_vals, bottom=bottom_pos, 
+                        label=label, color=colors[i], alpha=0.8, width=1.0)
+            bottom_pos += pos_vals
+            
+            # Negative bars
+            ax_stack.bar(indices, neg_vals, bottom=bottom_neg, 
+                        color=colors[i], alpha=0.8, width=1.0)
+            bottom_neg += neg_vals
+
+        ax_stack.set_title("Market Health Attribution (Daily Feature Contributions)", fontsize=16, fontweight='bold')
+        ax_stack.set_ylabel("Contribution Score")
+        ax_stack.axhline(0, color='black', linewidth=0.8, alpha=0.5)
+        ax_stack.grid(True, alpha=0.2, linestyle=':')
+        ax_stack.legend(loc="upper left", ncol=2, fontsize='small')
+        
+        # Bottom Plot (30%): Composite Health Score
+        y_health = plot_c_df["composite_health"].fillna(0).astype(float).values
+        ax_health.plot(indices, y_health, color="#0984e3", linewidth=2, label="Composite Health")
+        ax_health.fill_between(indices, 0, y_health, where=(y_health > 0), color="green", alpha=0.1)
+        ax_health.fill_between(indices, 0, y_health, where=(y_health < 0), color="red", alpha=0.1)
+        ax_health.set_ylabel("Health Score")
+        ax_health.axhline(0, color='black', linewidth=0.8, alpha=0.5)
+        ax_health.grid(True, alpha=0.2)
+        ax_health.legend(loc="upper left")
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "contrib_market_breadth.png"), dpi=200)
+        plt.close()
+        print("Contribution chart saved to contrib_market_breadth.png")
+            
+    except Exception as e:
+        print(f"Error generating contribution chart: {e}")
+
     print(f"Step 4 Complete. Output saved to {output_dir}")
+

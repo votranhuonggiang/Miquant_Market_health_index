@@ -96,197 +96,86 @@ def build_ew_index(vn_df, membership_map=None):
     return pd.DataFrame({"close": ew_level}, index=ew_level.index)
 
 # ============================================================
-# TECHNICAL INDICATOR HELPERS
+# NEW HELPERS FOR 4 PILLARS
 # ============================================================
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+def _get_roc(close, n):
+    return close.pct_change(n) * 100.0
 
-def calculate_atr(df, period=14):
-    high, low, close = df['high'], df['low'], df['close'].shift(1)
-    tr = pd.concat([high - low, (high - close).abs(), (low - close).abs()], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
+def _get_kst(close, sma_windows=(10, 10, 10, 15), roc_windows=(10, 15, 20, 30)):
+    rcma1 = _get_roc(close, roc_windows[0]).rolling(sma_windows[0]).mean()
+    rcma2 = _get_roc(close, roc_windows[1]).rolling(sma_windows[1]).mean()
+    rcma3 = _get_roc(close, roc_windows[2]).rolling(sma_windows[2]).mean()
+    rcma4 = _get_roc(close, roc_windows[3]).rolling(sma_windows[3]).mean()
+    kst = (1.0 * rcma1) + (2.0 * rcma2) + (3.0 * rcma3) + (4.0 * rcma4)
+    return kst
 
-def calculate_adx(df, period=14):
-    high, low, close = df['high'], df['low'], df['close'].shift(1)
-    tr = pd.concat([high - low, (high - close).abs(), (low - close).abs()], axis=1).max(axis=1)
-    atr_val = tr.rolling(window=period).mean()
-    up_move, down_move = high.diff(), -(low.diff())
-    pos_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    neg_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    pos_di = 100 * (pd.Series(pos_dm, index=df.index).rolling(window=period).mean() / atr_val.replace(0, np.nan))
-    neg_di = 100 * (pd.Series(neg_dm, index=df.index).rolling(window=period).mean() / atr_val.replace(0, np.nan))
-    dx = 100 * (pos_di - neg_di).abs() / (pos_di + neg_di).replace(0, np.nan)
-    return dx.rolling(window=period).mean()
+def _season4_from_kst(kst):
+    dkst = kst.diff()
+    pos, neg = kst >= 0, kst < 0
+    up, dn = dkst > 0, dkst < 0
+    season = pd.Series(0.0, index=kst.index, dtype='float32')
+    season[pos & up] = 1.0
+    season[neg & up] = 0.5
+    season[pos & dn] = -0.5
+    season[neg & dn] = -1.0
+    return season
 
-def calculate_macd(series, fast=12, slow=26, signal=9):
-    ema_fast = series.ewm(span=fast, adjust=False).mean()
-    ema_slow = series.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return macd_line - signal_line
-
-def rolling_linreg(series, window=20):
-    slopes = pd.Series(index=series.index, dtype=float)
-    r2s = pd.Series(index=series.index, dtype=float)
-    for i in range(window, len(series) + 1):
-        y = series.iloc[i-window:i]
-        x = np.arange(window)
-        slope, intercept, r_value, p_value, std_err = linregress(x, y)
-        slopes.iloc[i-1] = slope
-        r2s.iloc[i-1] = r_value**2
-    return slopes, r2s
-
-# ============================================================
-# FEATURE ENGINEERING: 4 FACTORS / 40 METRICS
-# ============================================================
-def extract_signal_generation_features(ew_df, vnidx_df, univ_prices_df):
+def extract_signal_generation_features(ew_df, vnidx_df, univ_prices_df, membership_map):
     """
-    Implements 40 metrics from signal_generation_metrics.md
-    Using the VN100 EW Index (ew_df) as the primary proxy.
+    Implements core market health pillars:
+    1. market_trend: Price distance from EMA50
+    2. market_cycle: Mean KST-based market season across VN100
+    3. market_breadth: % of VN100 stocks above EMA200
+    4. market_volatility: EGARCH-based annualized volatility of the EW index
     """
-    # ── Normalise ew_df index to tz-naive datetime ──────────────────────────
-    # build_ew_index uses pivot(index='timestamp') on raw QuestDB rows, so the
-    # index can be raw strings ("2016-01-04T00:00:00.000000Z"). Convert once
-    # here so every .reindex(ew_df.index) below finds the right dates.
     ew_df = ew_df.copy()
     _ew_idx = pd.to_datetime(ew_df.index)
     ew_df.index = (_ew_idx.tz_convert(None) if _ew_idx.tz is not None else _ew_idx).normalize()
-
+    
     feat = pd.DataFrame(index=ew_df.index)
     p = ew_df['close']
-    log_p = np.log(p)
     
-    # Pre-calculate common indicators
-    ema20 = p.ewm(span=20, adjust=False).mean()
+    # 1. Market Trend (EMA50) - Modified from f1_dist_long_ma to use EMA50
     ema50 = p.ewm(span=50, adjust=False).mean()
-    ema200 = p.ewm(span=200, adjust=False).mean()
+    feat['market_trend'] = (p - ema50) / ema50
     
-    # Build synthetic market OHLC from VN100 universe prices.
-    # VNINDEX in raw_eod has no real high/low (index prices, not traded) -> ADX/ATR = NaN.
-    # Use mean daily high/low across VN100 stocks as the market-wide OHLC proxy.
-    _ohlc = univ_prices_df[['timestamp', 'high', 'low', 'close']].copy()
-    _ohlc_ts = pd.to_datetime(_ohlc['timestamp'])
-    _ohlc['timestamp'] = (_ohlc_ts.dt.tz_convert(None) if _ohlc_ts.dt.tz is not None else _ohlc_ts).dt.normalize()
-    vn_idx = pd.DataFrame({
-        'high':  _ohlc.groupby('timestamp')['high'].mean(),
-        'low':   _ohlc.groupby('timestamp')['low'].mean(),
-        'close': _ohlc.groupby('timestamp')['close'].mean(),
-    })
-    vn_idx.index = pd.to_datetime(vn_idx.index)
-    vn_idx = vn_idx.reindex(ew_df.index).ffill()
-    vn_idx['close'] = p.values  # override with EW index close for consistency
-    # Keep VNINDEX close separately as benchmark for f1_rel_strength
-    _vn = vnidx_df.set_index('timestamp').copy()
-    _vn_ts = pd.to_datetime(_vn.index)
-    _vn.index = _vn_ts.tz_convert(None) if _vn_ts.tz is not None else _vn_ts
-    vn_close_bench = _vn['close'].astype(float).reindex(ew_df.index).ffill()
+    # Prepare wide price panel for aggregate metrics
+    _prices = univ_prices_df.pivot(index='timestamp', columns='symbol', values='close').sort_index()
+    _prices.index = pd.to_datetime(_prices.index)
+    _prices.index = (_prices.index.tz_convert(None) if _prices.index.tz is not None else _prices.index).normalize()
+    _prices = _prices.reindex(ew_df.index).ffill()
     
-    # ------------------------------------------------------------
-    # 1. Strength of Current Trend
-    # ------------------------------------------------------------
-    feat['f1_ma_slope'], feat['f1_r2_trend'] = rolling_linreg(log_p, 20)
-    feat['f1_ma_alignment'] = ((ema20 > ema50) & (ema50 > ema200)).astype(float)
-    feat['f1_adx'] = calculate_adx(vn_idx, 14)  # Uses real market-wide high/low from VN100
-    feat['f1_dist_long_ma'] = (p - ema200) / ema200
-    feat['f1_hh_hl'] = ((p > p.rolling(20).max().shift(1)) & (p.rolling(5).min() > p.rolling(20).min().shift(1))).astype(float)
+    # 2. Market Breadth (% of symbols above EMA200)
+    _ema200_all = _prices.apply(lambda x: x.ewm(span=200, adjust=False).mean())
+    _breadth_flags = (_prices > _ema200_all).astype(float)
+    feat['market_breadth'] = aggregate_by_membership(_breadth_flags, membership_map)
     
-    # Volume Trend Confirmation: Total market volume
-    # Parse → strip timezone → normalize to date only, so index aligns with ew_df.index
-    _vol_df = univ_prices_df[['timestamp', 'volume']].copy()
-    _ts = pd.to_datetime(_vol_df['timestamp'])
-    _vol_df['timestamp'] = (_ts.dt.tz_convert(None) if _ts.dt.tz is not None else _ts).dt.normalize()
-    total_vol = _vol_df.groupby('timestamp')['volume'].sum()
-    total_vol.index = pd.to_datetime(total_vol.index)
-    total_vol = total_vol.reindex(ew_df.index).ffill().fillna(0)
-    feat['f1_vol_confirm'] = total_vol / total_vol.rolling(20).mean().replace(0, np.nan)
+    # 3. Market Cycle (KST Seasons mapped to [-1, 1])
+    def get_season(s):
+        kst = _get_kst(s.ffill())
+        return _season4_from_kst(kst)
     
-    feat['f1_macd_hist'] = calculate_macd(p)
+    _seasons = _prices.apply(get_season)
+    feat['market_cycle'] = aggregate_by_membership(_seasons, membership_map)
     
-    # Relative Strength vs VNINDEX (use dedicated VNINDEX close benchmark)
-    ret_ew = p.pct_change(20)
-    ret_vn = vn_close_bench.pct_change(20)
-    feat['f1_rel_strength'] = ret_ew - ret_vn
-    
-    feat['f1_vol_adj_ret'] = p.pct_change().rolling(20).mean() / p.pct_change().rolling(20).std().replace(0, np.nan)
-
-    # ------------------------------------------------------------
-    # 2. Maturity / Stage of Trend
-    # ------------------------------------------------------------
-    feat['f2_rsi'] = calculate_rsi(p, 14)
-    feat['f2_dist_short_ma'] = (p - ema20) / ema20
-    
-    atr14 = calculate_atr(vn_idx, 14)
-    atr50 = calculate_atr(vn_idx, 50)
-    feat['f2_atr_expansion'] = atr14 / atr50.replace(0, np.nan)
-    
-    # Momentum Divergence: Price HH vs RSI LH (simplified score)
-    rsi14 = feat['f2_rsi']
-    feat['f2_mom_divergence'] = ((p > p.rolling(20).max().shift(1)) & (rsi14 < rsi14.rolling(20).max().shift(1))).astype(float)
-    
-    rolling_std = p.rolling(20).std()
-    upper_bb = ema20 + 2 * rolling_std
-    lower_bb = ema20 - 2 * rolling_std
-    feat['f2_bb_position'] = (p - lower_bb) / (upper_bb - lower_bb).replace(0, np.nan)
-    
-    feat['f2_sar_dist'] = (p - p.rolling(10).min()) / p.rolling(10).std().replace(0, np.nan) # SAR-like distance
-    feat['f2_time_since_breakout'] = (p.rolling(50).apply(lambda x: np.argmax(x == np.max(x)))) # Days since 50d high (approx)
-    
-    # Hurst Exponent (simplified via autocorrelation lag-1)
-    feat['f2_hurst_proxy'] = p.pct_change().rolling(100).apply(lambda x: x.autocorr(lag=1))
-    
-    feat['f2_rolling_skew'] = p.pct_change().rolling(63).skew()
-    feat['f2_vol_climax'] = (total_vol > total_vol.rolling(50).mean() + 2 * total_vol.rolling(50).std()).astype(float)
-
-    # ------------------------------------------------------------
-    # 3. Reward-to-Risk Ratio
-    # ------------------------------------------------------------
-    feat['f3_atr_stop_dist'] = atr14 / p.replace(0, np.nan)
-    feat['f3_swing_low_dist'] = (p - p.rolling(20).min()) / p.replace(0, np.nan)
-    feat['f3_expected_move_ratio'] = (p.rolling(20).max() - p) / (p - p.rolling(20).min()).replace(0, np.nan)
-    feat['f3_risk_adj_trend'] = feat['f1_ma_slope'] / p.pct_change().rolling(20).std().replace(0, np.nan)
-    
-    # Implied Vol Proxy: Percentile of Historical Vol
-    hist_vol = p.pct_change().rolling(20).std()
-    feat['f3_hist_vol_rank'] = hist_vol.rolling(252).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if not x.empty else np.nan)
-    
-    feat['f3_mae'] = (p - p.rolling(20).max()) / p.rolling(20).max().replace(0, np.nan)
-    
-    neg_rets = p.pct_change().where(p.pct_change() < 0, 0)
-    feat['f3_downside_vol'] = neg_rets.rolling(20).std()
-    
-    feat['f3_breakout_proj'] = (p.rolling(20).max() - p.rolling(20).min()) / p.replace(0, np.nan)
-    
-    # Kelly Fraction Proxy: (Mean Return / Variance) - simplified
-    feat['f3_kelly_proxy'] = p.pct_change().rolling(63).mean() / (p.pct_change().rolling(63).var() + 1e-6)
-    
-    feat['f3_var_5pct'] = p.pct_change().rolling(63).quantile(0.05)
-
-    # ------------------------------------------------------------
-    # 4. Potential Entry Levels
-    # ------------------------------------------------------------
-    feat['f4_breakout_level'] = (p >= p.rolling(50).max()).astype(float)
-    feat['f4_pullback_ma'] = 1 / (1 + (p - ema50).abs() / ema50) # Closer to 1 means closer to MA50
-    feat['f4_fib_retracement'] = (p - p.rolling(20).min()) / (p.rolling(20).max() - p.rolling(20).min()).replace(0, np.nan)
-    feat['f4_vol_confirmation'] = ((total_vol > 1.5 * total_vol.rolling(20).mean()) & (p > p.shift(1))).astype(float)
-    feat['f4_vol_contraction'] = 1 / (atr14 / atr50.replace(0, np.nan)).clip(lower=0.1)
-    
-    # VWAP Support (Anchored to current month)
-    # Simple proxy: Cumulative Price * Volume / Cumulative Volume within the month
-    vwap_proxy = (vn_idx['close'] * total_vol).cumsum() / total_vol.cumsum()
-    feat['f4_vwap_dist'] = (p - vwap_proxy) / vwap_proxy.replace(0, np.nan)
-    
-    # Confluence Score: proximity to multiple MAs
-    feat['f4_confluence'] = (1 / (1 + (p - ema20).abs()/p) + 1 / (1 + (p - ema50).abs()/p) + 1 / (1 + (p - ema200).abs()/p)) / 3.0
-    
-    feat['f4_rsi_reset'] = ((rsi14 > 50) & (rsi14 < 60)).astype(float)
-    feat['f4_donchian_break'] = (p > p.rolling(20).max().shift(1)).astype(float)
-    feat['f4_market_regime'] = (vn_close_bench > vn_close_bench.ewm(span=200, adjust=False).mean()).astype(float)
-
+    # 4. Market Volatility (Annualized EGARCH(1,1)-t)
+    try:
+        from arch import arch_model
+        rets = np.log(p / p.shift(1)).dropna()
+        if not rets.empty:
+            rets_pct = 100.0 * rets
+            am = arch_model(rets_pct, mean="ARX", vol="EGARCH", p=1, o=1, q=1, dist="studentst")
+            res = am.fit(disp="off")
+            sigma_daily = res.conditional_volatility / 100.0
+            feat['market_volatility'] = sigma_daily.reindex(ew_df.index) * np.sqrt(252)
+        else:
+            feat['market_volatility'] = np.nan
+    except Exception:
+        # Fallback to simple rolling volatility
+        feat['market_volatility'] = p.pct_change().rolling(20).std() * np.sqrt(252)
+        
     return feat
+
 
 def winsorize_features(feat_df, lower=1, upper=99):
     out = feat_df.copy()
@@ -324,8 +213,9 @@ if __name__ == "__main__":
     map100 = build_membership_map(univ100, max_dt)
     ew100 = build_ew_index(df100, map100)
     
-    print("Computing 40 Signal Generation Metrics...")
-    feat_df = extract_signal_generation_features(ew100, vnidx, df100)
+    print("Computing 4 Market Health Pillars...")
+    feat_df = extract_signal_generation_features(ew100, vnidx, df100, map100)
+
     
     # Winsorize and Z-score (Normalization as suggested in 'How a Quant Would Combine These')
     feat_df = winsorize_features(feat_df)
@@ -352,5 +242,6 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "step1_features_overview.png"))
     plt.close()
-    
-    print("Step 1 Complete: 10 pillars replaced by 40 signal generation metrics.")
+
+    print("Step 1 Complete: 4 Market Health Pillars computed.")
+
