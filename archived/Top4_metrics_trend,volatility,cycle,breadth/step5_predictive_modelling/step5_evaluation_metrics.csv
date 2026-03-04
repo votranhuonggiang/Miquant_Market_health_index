@@ -1,0 +1,2 @@
+model,precision,recall,accuracy,f1_score,train_start,train_end,test_start,test_end,n_train,n_test,forecast_horizon_days,pe_order,pe_window
+Logistic Regression (Base),0.6600877192982456,0.7377450980392157,0.657516339869281,0.6967592592592593,2016-03-22,2022-12-30,2023-01-03,2026-01-27,1701,765,10,3,50

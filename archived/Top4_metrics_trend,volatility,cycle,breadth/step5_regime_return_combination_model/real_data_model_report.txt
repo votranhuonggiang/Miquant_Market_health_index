@@ -1,0 +1,26 @@
+=== JOINT REGIME-SWITCHING MODEL REPORT (VN100 EW) ===
+
+Model Parameters: beta=10.0, lambda=50
+Total Objective: -56746.3733
+
+Bull Market:
+  Mean Log Return: 0.2344%
+  Volatility (Std): 0.8470%
+  Sample Size:      1122
+  Centroid L2 Norm: 0.5654
+
+Bear Market:
+  Mean Log Return: -0.4307%
+  Volatility (Std): 2.3533%
+  Sample Size:      403
+  Centroid L2 Norm: 1.5741
+
+=== TRANSITION PROBABILITIES ===
+P(Bull | Bull): 0.9831
+P(Bear | Bull): 0.0169
+P(Bear | Bear): 0.9529
+P(Bull | Bear): 0.0471
+
+=== NEXT DAY REGIME FORECAST ===
+Probability Bull: 0.8405
+Probability Bear: 0.1595
